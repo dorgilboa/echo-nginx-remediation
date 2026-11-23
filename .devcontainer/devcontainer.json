@@ -6,7 +6,7 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "remoteUser": "vscode",
-  "postCreateCommand": "bash scripts/fetch-nginx-source.sh && bash scripts/versions.sh",
+  "postCreateCommand": "bash scripts/versions.sh",
   "customizations": {
     "vscode": {
       "extensions": ["ms-azuretools.vscode-docker", "ms-python.python", "golang.go", "ms-vscode.makefile-tools"]
