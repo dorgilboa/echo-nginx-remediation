@@ -1,194 +1,183 @@
 # Echo - Build It, Patch It, Ship It
 
-A drop-in replacement for `nginx:1.25-bookworm` (nginx 1.25.5), compiled from source on `debian:bookworm-slim`, with two CVE fixes done end to end and a compatibility test that compares it against the original.
+A drop-in replacement for `nginx:1.25-bookworm` (nginx 1.25.5), compiled from source on `debian:bookworm-slim`, with two CVE fixes done end to end (a library version bump and a backported patch), a VEX document, and an automated test that compares it against the original.
 
-> **Status:** build, image, compatibility test (including file-layout parity), baseline, rescan and VEX are done. What is left is listed under [Open items](#open-items).
+I had not done vulnerability remediation on container images before, so this README also records how I worked it out, what went wrong, and what I still would not claim.
 
-## In one minute
+## At a glance
 
-| | Original | Ours |
+| | Original | Mine |
 |---|---|---|
 | Image | `nginx:1.25-bookworm` | `echo-nginx:test` |
 | Size | 273.1 MB | 130.3 MB |
-| nginx | 1.25.5 (nginx.org package) | 1.25.5 compiled from the nginx.org tarball |
-| libssl3 (OpenSSL) | 3.0.11-1~deb12u2 | 3.0.22-1~deb12u2 |
-| CVE-2024-7347 (mp4 module) | present | patched in source |
+| nginx | 1.25.5, nginx.org package | 1.25.5, compiled from the nginx.org tarball |
+| OpenSSL (`libssl3`) | 3.0.11-1~deb12u2 | 3.0.22-1~deb12u2 |
+| CVE-2024-7347 (mp4 module) | present | patched in the source |
 | Compatibility test | - | 25 of 25 pass |
-| nginx CVEs flagged by Grype (CPE mode) | 31 | 31; our VEX file removes 3 of them for Grype (CVE-2024-7347, CVE-2013-0337, CVE-2009-4487) |
 
-Two fixes, two different techniques:
-- **Version bump:** OpenSSL (`libssl3`), the TLS library nginx links. One bump clears 10 HIGH/CRITICAL findings.
-- **Backport:** CVE-2024-7347 in nginx's mp4 module. The fix exists upstream (1.27.1) but not for 1.25.5, so I applied nginx's official patch to the 1.25.5 source.
+- **Fix 1, version bump:** `libssl3`, the TLS library nginx links. One bump clears ten findings.
+- **Fix 2, backport:** CVE-2024-7347 in nginx's mp4 module. nginx fixed it in 1.27.1 but not for 1.25.5, so I applied nginx's official patch to 1.25.5.
 
-## How to build and test
+## Build and test
 
-Needs Docker with BuildKit, `make`, and Python 3. Run from the repo root.
+Needs Docker with BuildKit, `make` and Python 3. Run from the repo root.
 
 ```bash
-make deb        # clean debian:bookworm-slim -> download + verify source -> patch -> compile -> dist/nginx_1.25.5-1~bookworm_amd64.deb
-make image      # installs the .deb into a minimal Debian image: echo-nginx:test
-make self-test  # sanity check of the test itself: upstream compared with upstream (must pass)
-make test       # upstream vs our image; exits non-zero on any mismatch
-make vex        # regenerate the VEX document for the built image (bound to its digest)
+make deb        # clean debian:bookworm-slim -> verify source -> patch -> compile -> dist/nginx_1.25.5-1~bookworm_amd64.deb
+make image      # install the .deb into a minimal Debian image: echo-nginx:test
+make self-test  # upstream compared with upstream; must pass, it proves the test itself works
+make test       # upstream vs my image; exits non-zero on any mismatch
+make vex        # regenerate the VEX document for the built image
 ```
 
-What `make deb` does (all inside `build/Dockerfile`, nothing pre-baked):
+`make deb` runs these steps inside `build/Dockerfile`, with no pre-built binaries:
 
-1. `install-deps.sh`: installs compilers and `-dev` libraries; refuses to continue if `libssl-dev` is older than 3.0.22-1~deb12u2.
-2. `get-sources.sh`: downloads the 1.25.5 tarball from nginx.org only, checks the PGP signer against a pinned fingerprint, checks the SHA-256, then unpacks. Any mismatch stops the build and leaves nothing behind.
-3. `apply-patches.sh`: applies every `build/patches/CVE-*.patch` with no fuzz; fails if one does not apply cleanly.
-4. `build-deb.sh`: runs `./configure` with upstream's exact 42 flags (hardening included), `make install` into a staging folder, then `dpkg-deb`.
+1. `install-deps.sh` installs the compiler and `-dev` libraries from Debian and stops if `libssl-dev` is older than 3.0.22-1~deb12u2.
+2. `get-sources.sh` downloads the 1.25.5 tarball from nginx.org, checks its PGP signature against a pinned key fingerprint and its SHA-256 against `build/SHA256SUMS`, and stops on any mismatch.
+3. `apply-patches.sh` applies every `build/patches/CVE-*.patch` with no fuzz and fails if one does not apply cleanly.
+4. `build-deb.sh` runs `./configure` with upstream's exact 42 flags, runs `make install` into a staging folder and builds the package with `dpkg-deb`.
 
-The `Containerfile` then creates the `nginx` user (uid/gid 101, as upstream) *before* installing the `.deb`, installs it, and copies upstream's entrypoint scripts, log symlinks, port, stop signal and CMD.
+The `Containerfile` creates the `nginx` user with uid/gid 101 (as upstream) *before* installing the `.deb`, then adds upstream's entrypoint scripts, log symlinks, port 80, stop signal and CMD.
 
-## Triage: how the CVEs were chosen
+On my Windows machine `make` is not installed. I ran the commands it wraps by hand (`docker build ...`, `python test/compat_test.py`) and checked the Makefile with `make -n`, which prints exactly those commands.
 
-I scanned the original with Trivy and Grype first (`baseline/`): 960 and 890 findings. Most are in base-image libraries that nginx never uses, so I narrowed down to what matters for nginx:
+## How I picked the CVEs
 
-1. **What does nginx actually load?** An SBOM only lists what is installed, so I used `ldd` on the binary: libc6, libcrypt1, zlib1g, libpcre2-8-0 and libssl3. `libssl3` had the most severe findings that have a fix.
-2. **Only fixable, only HIGH/CRITICAL.** A bump or backport needs a target version, so unfixed findings were set aside (`scripts/filter-baseline.sh` produces the filtered view).
-3. **Check the severity.** Scanners score the library in the worst case. OpenSSL's own advisories rate most of the ten as Low and none sit on nginx's normal TLS handshake path. Severity is not the same as being exploitable in our deployment, and I wrote the README with that in mind.
-4. **Confirm the fix target** on the Debian security tracker (Debian version numbers differ from OpenSSL's own numbering): 3.0.22-1~deb12u2 fixes all ten.
+The original has 960 findings in Trivy and 890 in Grype (`baseline/`), mostly in base-image libraries. To narrow it down:
 
-## Per-CVE table
+1. **What does nginx really use?** An SBOM lists what is installed, not what is loaded, so the check was `ldd` on the binary: libc6, libcrypt1, zlib1g, libpcre2 and libssl3. `libssl3` had the most serious findings.
+2. **Only fixable HIGH/CRITICAL.** A bump needs a fixed version to move to (`scripts/filter-baseline.sh` makes this view).
+3. **Check the severity.** Scanners score the worst case for the library. OpenSSL's own advisories rate most of these as Low, and none is on nginx's normal TLS handshake path. A "Critical" label is not the same as being exploitable in my image.
+4. **Confirm the target version** on the Debian security tracker, because Debian's version numbers differ from OpenSSL's own: `3.0.22-1~deb12u2` includes all ten fixes.
 
-Severity is shown as *scanner / vendor's own rating* where they differ.
+## Fixed CVEs
 
-| CVE | Where | Severity | Method | Evidence |
+Severity is the scanner's rating, then the vendor's own where it differs (OpenSSL's advisories, nginx's advisory page).
+
+| CVE | Where | Severity | Fix | Evidence |
 |---|---|---|---|---|
-| CVE-2025-15467 | libssl3 (CMS parsing, not TLS) | High / OpenSSL: High | **bump** to 3.0.22-1~deb12u2 | [rescan/diff.md](rescan/diff.md) (gone after the bump) |
-| CVE-2026-84782 | libssl3 (DTLS) | High / High for DTLS users, but nginx has no DTLS | **bump** | [rescan/diff.md](rescan/diff.md); `nm -D` on nginx: 0 DTLS symbols imported (LOG.md, 2026-11-24) |
-| CVE-2026-31789 | libssl3 | Critical / OpenSSL: Low (32-bit only, certificates over about 1 GB) | **bump** | [rescan/diff.md](rescan/diff.md) |
-| 7 more libssl3 CVEs | libssl3 | High (some Low or Moderate per OpenSSL) | **bump** (same package, same bump) | [rescan/diff.md](rescan/diff.md) table |
-| CVE-2024-7347 | nginx `ngx_http_mp4_module.c` | Medium (Grype) / nginx: low | **backport** of nginx's official patch | [patch](build/patches/CVE-2024-7347.patch), [provenance](build/patches/README.md), [test](test/compat_test.py) (`Mp4PatchVerification`), [VEX](vex/echo-nginx.openvex.json), [VEX verification](vex/verification.md) |
-| curl, libheif, libtiff, libxml2, krb5 libs, expat... (hundreds) | packages the original ships | various | **remove** (not installed in ours) | [rescan/diff.md](rescan/diff.md). Does **not** count toward the two required fixes |
+| CVE-2026-31789 | libssl3, hex printing of huge certificate fields | Critical / OpenSSL: Low (32-bit only) | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2024-6119 | libssl3, X.509 name check | High / Moderate | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2025-15467 | libssl3, CMS parsing | High / High | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2025-69421 | libssl3, PKCS#12 parsing | High / Low | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-28387 | libssl3, DANE client | High / Low | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-28388 | libssl3, delta CRL | High / Low | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-28389 | libssl3, CMS | High / Low | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-28390 | libssl3, CMS | High / Low | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-45447 | libssl3, `PKCS7_verify` | High / High | bump | [rescan/diff.md](rescan/diff.md) |
+| CVE-2026-84782 | libssl3, DTLS | High / High (nginx has no DTLS) | bump | [rescan/diff.md](rescan/diff.md), [vex/verification.md](vex/verification.md) |
+| CVE-2024-7347 | nginx mp4 module | Medium (Grype) / nginx: low | **backport** | [patch](build/patches/CVE-2024-7347.patch), [provenance](build/patches/README.md), [tests](test/compat_test.py), [vex/verification.md](vex/verification.md) |
 
-Of the 694 Trivy findings that disappeared, 496 are only gone because the packages are no longer in the image, and 198 because package versions changed (including a newer Debian base, 12.15 instead of 12.5). Credit for the two real fixes is a small part of that number, and I do not claim otherwise.
+None of the ten OpenSSL CVEs sits on the path nginx uses for normal TLS (CMS, PKCS, DANE, CRL and DTLS code), so I do not claim the bump stopped a real attack on nginx. It is the right hygiene, and the scanners' counts show it. The OpenSSL ratings come from OpenSSL's advisory page, which I read through a summarizing tool; the CVE-2024-6119 row was only available as a summary, so treat it as unconfirmed.
 
-## VEX: telling the scanner the fixes are real
+**Removals do not count.** Many more findings are gone only because I removed packages (`curl`, and the libraries the four dynamic modules pulled in, such as libheif, libtiff and libxml2). The brief does not credit that, and I do not either.
 
-A backport changes the code but not the version string (`1.25.5-1~bookworm`), and scanners match on name and version. So after the patch, Grype keeps reporting CVE-2024-7347. A VEX (Vulnerability Exploitability eXchange) file is a small statement shipped next to the image saying "this CVE is `fixed` (or `not_affected`) in this product, and why".
+## Results of the rescan
 
-[`vex/echo-nginx.openvex.json`](vex/echo-nginx.openvex.json) is an OpenVEX document with four statements:
+Same scanners and settings as the baseline (`rescan/`, full comparison in [rescan/diff.md](rescan/diff.md)).
 
-| CVE | Status | Why |
+| | Baseline | Mine |
 |---|---|---|
-| CVE-2024-7347 | `fixed` | the backport described above |
-| CVE-2026-84782 | `fixed` | Debian's tracker lists the fix in `libssl3` 3.0.22-1~deb12u2, which is installed; some scanners compare with upstream OpenSSL numbering (fixed in 3.0.23) and still match. It is also DTLS code, and nginx imports no DTLS symbols |
-| CVE-2013-0337 | `not_affected`, inline mitigation | describes world-readable `access.log`/`error.log`; in this image both are symlinks to `/dev/stdout` and `/dev/stderr` |
-| CVE-2009-4487 | `not_affected`, inline mitigation | terminal escape sequences reaching the log; tested: an ESC byte in the User-Agent and request line is logged as the text `` |
+| Trivy | 960 findings (21 critical, 238 high) | 268 (1 critical, 39 high) |
+| Grype | 890 | 253 |
+| Trivy, fixable HIGH/CRITICAL | - | 0 |
 
-**The document is generated, not hand-written** (`make vex`, `vex/make_vex.py`). Because our package keeps upstream's version string, a statement naming only the package would also describe upstream's still-vulnerable package and wrongly hide its findings (tested: it does). So every statement is bound to our image's digest, with the packages as sub-components. A rebuilt image has a new digest, so the file must be regenerated after each rebuild.
+Where the 694 disappeared Trivy findings come from: **496** are packages no longer in the image, and **198** are packages whose version changed. That includes a newer Debian base (12.15 instead of 12.5), so the two real fixes explain only part of the drop. The baseline and rescan ran a day apart and the scanner databases differ, so a few findings appear "new" through data drift alone.
 
-**Verification** ([vex/verification.md](vex/verification.md), `vex/verify.py`): each CVE was scanned with and without the VEX file, on our image and on upstream. In Grype all four disappear from our image and **stay flagged on upstream**, which is the check that the VEX does not hide anything it should not.
+## The backport and the VEX
 
-Limits worth knowing:
-- **Trivy can show only part of it.** `trivy --vex` removes the findings Trivy reports: CVE-2013-0337 and CVE-2009-4487 on our image. It never reports CVE-2024-7347 because it has no CPE matching (see difficulty 2), so that one can only be shown with Grype.
-- **A VEX is a claim, not proof.** It is only as good as the evidence behind it. The two `not_affected` statements rest on a configuration fact and one logging test.
-- **Not covered:** CVE-2026-107494 (QUIC, likely not applicable). I left it out because it is still unconfirmed in the OpenSSL 3.0 source.
+CVE-2024-7347 is a bug in how the mp4 module reads the `stsc` table of an mp4 file when a client seeks with `?start=`. nginx publishes a signed patch for it. Its signature was verified, it applies cleanly to a freshly verified 1.25.5 tree, and the patched file compiles with `-Werror`; `build/patches/README.md` has the details.
+
+A backport changes the code, not the version string (`1.25.5-1~bookworm`), and scanners match on name and version, so Grype keeps reporting the CVE. That is what a **VEX** (Vulnerability Exploitability eXchange) file is for: a signed-off statement saying a CVE is `fixed` or `not_affected` in a given product. [`vex/echo-nginx.openvex.json`](vex/echo-nginx.openvex.json) has four statements:
+
+| CVE | Status | Reason |
+|---|---|---|
+| CVE-2024-7347 | fixed | the backport above |
+| CVE-2026-84782 | fixed | Debian's `libssl3` 3.0.22-1~deb12u2 has the fix; Grype compares against upstream OpenSSL numbering (fixed in 3.0.23) and still matches |
+| CVE-2013-0337 | not affected | about world-readable log files; here the logs are symlinks to `/dev/stdout` and `/dev/stderr` |
+| CVE-2009-4487 | not affected | about escape sequences in logs; in a test nginx logged them as the text `\x1B`, not as raw bytes |
+
+The file is **generated** (`make vex`), because my package keeps upstream's version string: a statement that named only the package would also describe the original's still-vulnerable package. Testing showed it does hide findings on the original. So each statement is tied to my image's digest, with the packages as sub-components, and has to be regenerated after a rebuild.
+
+`vex/verify.py` scans with and without the VEX on my image and on upstream ([vex/verification.md](vex/verification.md)). In Grype all four CVEs disappear on my image and **stay flagged on upstream**. Trivy only shows the two old CVEs going away: it cannot see nginx's own CVEs, so the backported CVE can only be shown with Grype.
 
 ## The compatibility test
 
-`test/compat_test.py` (Python, standard library only) starts the original and our image as separate containers, sends both the same requests, and exits non-zero on any difference.
+`test/compat_test.py` (Python, standard library only) starts the original and my image as two containers, sends the same requests to both, and exits non-zero on any difference.
 
-**"Working correctly" means:** for the same request, our image returns the same status, the same headers (all of them, except `Date`, `ETag` and `Last-Modified`, which are only sanity-checked), and the same body as the original. The 25 tests cover:
+**"Working correctly" means:** the same status line, the same body and the same headers, apart from `Date`, `ETag` and `Last-Modified`, which only get sanity checks because they legitimately differ. The 25 tests cover:
 
-- default page and 404, custom config, large request body, malformed request
-- TLS 1.2 and 1.3 and ALPN
-- mp4 serving: whole file, `?start=1`, `?start=1.5`
-- file layout parity: every nginx-related file has the same type, mode, owner and link target as upstream, except an explicit list of documented deviations. A second test keeps that list honest (each exception must match something upstream has and nothing we ship)
-- image metadata (user, working dir, ports, entrypoint, CMD, env), `nginx -V` configure flags, hashes of the config and entrypoint files
-- **fix checks (ours only):** `libssl3` is at least 3.0.22-1~deb12u2 and linked by nginx; the patched mp4 code path logs `unordered mp4 stsc chunks`; the worker survives and still answers
+- default page, 404, custom config, large body (413), malformed request line, bad HTTP version, over-long URI
+- HTTPS with TLS 1.2 and 1.3 and the ALPN choice
+- mp4 seeking: whole file, `?start=1`, `?start=1.5`
+- file layout: every nginx-related file has the same type, mode, owner and link target as the original, except a written list of deviations. A second test fails if an exception matches nothing upstream has, or hides something I ship
+- image metadata (user, ports, entrypoint, CMD), `nginx -V` flags, hashes of the config and entrypoint files
+- **fix checks, my image only:** `libssl3` is at least 3.0.22-1~deb12u2 and linked by nginx; the patched mp4 code logs `unordered mp4 stsc chunks` for a crafted file and the worker keeps answering
 
-`make self-test` runs the suite with upstream on both sides to prove the test itself is sound. I also ran the fix checks against an unpatched copy: exactly the two fix tests fail and parity still passes, so they can detect a missing fix.
+The test came before the image: `make self-test` (original against original) passes, the empty skeleton image fails because nginx is not running, and an unpatched copy of the original fails exactly the two fix tests. That shows the tests can fail.
 
-## Difficulties and how I got through them
+**Not covered:** file contents beyond the hashed configs, HTTP/3, the mail and stream modules, performance, and config files other than the ones in `test/conf/`.
 
-**1. Choosing what to fix, and what to dig into.**
-The scans list ~900 findings. I filtered by what nginx links, whether a fix exists, and severity, then checked each candidate against OpenSSL's advisories and the Debian tracker. That showed scanner severities are often much higher than the vendor's, so I picked CVEs I could actually explain: one that is not TLS code (CMS) and one that is DTLS (nginx does not use it), both inside one bump.
+## Where I hit a wall
 
-**2. The scanners did not find any nginx CVEs.**
-Trivy reported nothing for the nginx package, and Grype only two ancient ones. The reason: both match nginx.org builds against *Debian's* tracker, and Debian ships a different nginx. If I had followed the shortcut (use Debian's package, or `apt`), the original would have looked already patched and there would have been nothing to backport. Instead:
-- Grype has a CPE mode (`GRYPE_MATCH_DPKG_USING_CPES=true`) that matches the product name/version, and it flagged 29 nginx CVEs. I use it for the baseline, the rescan and the VEX demo (`baseline/baseline-grype-cpe.*`).
-- Trivy has no equivalent (I tested `--detection-priority comprehensive`: still nothing).
-- Even CPE mode missed 9 of the 38 CVEs that nginx.org lists for 1.25.5, so nginx's own advisory page is the reference for nginx CVEs, and the scanner output is only a view of it.
+1. **The scanners found no nginx CVEs.** Trivy reported nothing for nginx and Grype two ancient ones, because both match nginx.org's build against *Debian's* tracker, and Debian ships a different nginx. Without a fix there would have been nothing to remove and nothing for a VEX to hide. Grype's CPE mode (`GRYPE_MATCH_DPKG_USING_CPES=true`) flags 29 nginx CVEs (`baseline/baseline-grype-cpe.*`), so I use it for the baseline, the rescan and the VEX demonstration. Trivy has no equivalent: `--detection-priority comprehensive` still found nothing. Even CPE mode missed 9 of the 38 CVEs nginx lists for 1.25.5, so nginx's own advisory page is the real reference.
+2. **The original would not crash.** There is no public exploit file, so a valid mp4 was generated (random-noise H.264, `ffmpeg`) and its `stsc` table rewritten out of order. The original answers it with HTTP 500 and the message `start time is out mp4 stco chunks`, with no crash. So the test asserts the new log line from the patched check, and I do not claim the patch prevented a crash.
+3. **Patch fuzz.** The first version of `apply-patches.sh` accepted a patch whose context had been deliberately corrupted, because `patch` tolerates mismatching lines by default. Fixed with `-F0`.
+4. **Two "new" findings in Trivy.** My package is flagged for CVE-2009-4487 and CVE-2013-0337 (old, low), and the original is not. A test showed Trivy skips them when the package's Maintainer field is NGINX's. Copying that would credit my build to F5, so I left it, documented them and covered them in the VEX.
+5. **A test run that stalled.** Twice, container cleanup took far longer than normal and once reported a negative timeout, which points to the host pausing and not to nginx. I could not prove the cause, so cleanup now only warns, and test containers carry a label so leftovers can be found.
+6. **Windows and Linux.** Files written on Windows had CRLF line endings that broke flag files inside Linux containers. `.gitattributes` forces LF and scratch files get `\r` stripped.
 
-**3. Finding a backport I could verify.**
-Most nginx advisories link only a mailing-list post. CVE-2024-7347 has an official signed patch file, which I verified (signature, then a dry run on 1.25.5, then compiled with `-Werror`). Trade-off I accepted: a clean patch, but a low-impact bug.
-
-**4. Building a malformed mp4 to test the backport.**
-No public exploit file, and writing one from scratch was not realistic. Plan: make a valid small mp4 (48x48 random-noise H.264 made with ffmpeg, command in `test/mp4_tools.py`), then rewrite its `stsc` table in Python so the entries are out of order. I tested this on the original first: it returns HTTP 500 with the message `start time is out mp4 stco chunks` and does **not** crash. So the observable difference to assert is the new log line from the patched check, and that is what the test uses. I did not reproduce the crash, and the README says so.
-
-**5. Writing the compatibility test before the image existed (test first).**
-I built the test harness and empty Dockerfile skeletons before any fix, then confirmed three things: upstream vs upstream passes, the skeleton image fails for the right reason (nginx not even running), and an unpatched copy fails exactly the fix tests. A test that cannot fail proves nothing, so each failure was checked. Parity tests (must match the original) are kept apart from fix tests (ours only), because a fixed build is supposed to behave differently on the patched path.
-
-**6. Patch fuzz hid a broken patch.**
-My own negative test (corrupting one context line) showed `patch` still applied it with default fuzz. Fixed with `-F0`, so a drifted patch fails the build instead of silently half-applying.
-
-**7. Scanner results that need explaining, not fixing.**
-- Our package is flagged by Trivy with 2 "new" ancient LOW CVEs (CVE-2009-4487, CVE-2013-0337). Grype already flagged them on the original. Experiment: they vanish if the package's Maintainer field is NGINX's, so it is a scanner matching artifact. I chose not to copy the maintainer, because that would misattribute our build to F5/NGINX. They concern nginx 1.3.x and older.
-- CVE-2026-107494 (HIGH on libssl3) has no fix in bookworm. It is in OpenSSL's QUIC code, and libssl 3.0.x exports no QUIC symbols and nginx imports none, so it is likely not applicable. Not confirmed in the OpenSSL 3.0 source, so it is worded as "likely".
-- Scanner databases differ by a day between baseline and rescan, so one CVE appears as "new" through data drift only.
-
-**8. An unexplained test stall.**
-The test suite stalled twice at teardown (`docker rm -f` timed out; once the error showed a negative timeout, which points to a host-level pause, not nginx). Not proven. Cleanup now warns instead of failing, with a label on test containers so leftovers can be removed.
-
-**9. Windows host, Linux containers.**
-Line endings: CRLF written on Windows broke scripts and flag files inside Linux containers (`.gitattributes` forces LF; scratch files are stripped of `\r`). `make` is not installed on the host, so I verified the same commands directly with `docker build`.
-
-*(Add further difficulties here.)*
-
-## Deliberate differences from the original image
+## Differences from the original image
 
 | Difference | Why |
 |---|---|
-| The 4 dynamic-module packages (geoip, image-filter, njs, xslt) are not built | Scope: core nginx only. The brief allows removing extras. Their libraries are a large part of the baseline CVE count, so this shrinks the image but is not credited as a fix |
-| No `curl` or `openssl` CLI in the image | nginx does not need them; they carry many CVEs. `gettext-base` (for the entrypoint's `envsubst`) and `ca-certificates` are kept |
-| `.deb` ships core files only: no init scripts, systemd units, logrotate, man page, `nginx-debug` | Meaningless in a container. Listed as exceptions in the layout-parity test, which fails if an exception goes stale or hides a file we do ship |
-| `NJS_VERSION` / `NJS_RELEASE` env vars kept | Parity only; njs is not shipped |
-| Different `Maintainer` label | Honest attribution, see difficulty 7 |
-| Package version identical to upstream (`1.25.5-1~bookworm`) | Matches the brief's heads-up and keeps the VEX demo clean; the VEX document is bound to the image digest and this version string |
+| The four dynamic-module packages (geoip, image-filter, njs, xslt) are not built | Scope: core nginx only. The brief allows removing extras, with no credit as a fix |
+| No `curl` or `openssl` command line tool; `gettext-base` and `ca-certificates` kept | nginx does not need them; `gettext-base` is needed by the entrypoint's `envsubst` |
+| No init scripts, systemd units, logrotate config, man page or `nginx-debug` binary | They do nothing in a container; each is an exception in the layout test |
+| `NJS_VERSION` and `NJS_RELEASE` variables kept | Parity only; njs is not shipped |
+| `Maintainer` and image label are mine | Honest attribution (see wall 4) |
+| Package version identical to upstream | Matches what the brief describes, and keeps the VEX demonstration clear |
 
-## Residual risk
+## Residual risk and next steps
 
-- **nginx itself:** 31 CVEs flagged before, 31 after (Grype CPE mode). I fixed one of them; the rest apply to 1.25.5 and have no patch on the 1.25 branch. Next step: a newer nginx (mainline or stable) is the real fix. Backporting each is not sustainable.
-- **CVE-2024-7347:** still flagged by a plain scan because the version string is unchanged; the [VEX file](vex/echo-nginx.openvex.json) removes it for VEX-aware scanners (shown with Grype). Scanners that ignore VEX will still list it.
-- **libssl3:** 8 findings remain (4 medium, 3 low, CVE-2026-107494 high, probably not applicable).
-- **Base image:** the remaining Trivy findings (1 critical, 39 high) are in Debian packages (libc6, zlib1g CVE-2023-45853 `will_not_fix`, and others), outside what I targeted. Next step: bump one by one with the same method, starting with libpcre2 (already newer in our image) and libc6.
-- **Severity inflation:** scanner "Critical" and "High" labels are often higher than the vendors' rating; most OpenSSL items are not reachable through nginx. VEX with `not_affected` justifications is the proper tool for those, once each has its own evidence.
-- **Supply chain:** the tarball signing key was compared with the copy on nginx.org, which only shows nginx.org agrees with itself. No independent keyserver check yet. The base image is referenced by tag, not by digest, and the `.deb` build is not verified to be bit-for-bit reproducible.
+- **nginx itself:** Grype (CPE mode) flags the same 31 nginx findings before and after; 15 of them are HIGH or CRITICAL. I fixed one. The others have no patch for the 1.25 branch. The real fix is a newer nginx release, not backporting each one.
+- **CVE-2024-7347:** a plain scan still lists it, since the version did not change. Scanners that ignore VEX will too.
+- **libssl3:** Trivy lists 8 findings (CVE-2026-107494 high, 4 medium, 3 low). Grype also rates CVE-2026-107493, -107496 and -84786 as High; OpenSSL fixed them in 3.0.24, which Debian had not shipped when I scanned. CVE-2026-107494 is in OpenSSL's QUIC code; libssl 3.0.11 exports no QUIC symbols and nginx imports none, so it is probably not applicable. I have not confirmed that in the OpenSSL 3.0 source, so I did not write a VEX statement for it.
+- **Severity labels:** most scanner "Critical" and "High" ratings are higher than the vendors' and many are not reachable through nginx. `not_affected` VEX statements are the right tool, but only with evidence for each one.
+- **Supply chain:** the tarball is verified against the signing key published on nginx.org, which does not prove the key is genuine; there was no independent check. The base image is referenced by tag, not digest, and the `.deb` was not tested for building identically twice.
+- **Next:** pin the base image by digest, move to a newer nginx, confirm the QUIC question in the source, and try a second backport with a real reproduction.
 
-## Open items
+## Working process
 
-- [x] VEX document, verified on our image and on upstream (see the VEX section).
-- [x] Layout-parity test with an explicit list of documented exceptions.
-- [ ] A `not_affected` statement for CVE-2026-107494, only after confirming in the OpenSSL 3.0 source that the QUIC code is absent.
-- [ ] Run `make image` and `make test` where `make` is installed (the equivalent `docker` commands were verified).
-- [ ] Merge the topic branches into `main` and push.
+I worked in small steps, deciding each one before it was built, and kept each change on its own branch merged into `main`: source fetch, CVE triage, scans, backport, `.deb` packaging, image, tests, VEX. The test harness came before the image, and each new script was run in a clean `debian:bookworm-slim` container before I trusted it, including a deliberate failure case (a corrupted patch, a wrong checksum, a broken copy of the image). A work log was kept locally as I went.
 
 ## What surprised me / what I would do differently
 
-- Scanners are blind to nginx.org-built nginx unless told to match by product name, and then only one of the two (Grype) can show a VEX effect.
-- The two required fixes explain only a small part of the drop in CVE count. Base image age and removing packages explain most of it.
-- A vulnerable build did not crash on my crafted file, so a test for a "crash fix" ended up checking a log message.
-- With more time: use a newer nginx, pin the base image by digest, check reproducibility, try a second backport with a real crash reproduction.
+- Scanners miss nginx.org-built nginx unless told to match by product name, and only Grype can then show a VEX effect.
+- A scanner's severity is not the same as risk. The "Critical" in my table is Low according to OpenSSL.
+- The two fixes are a small part of the drop in finding counts; the older base image and removed packages account for most of it.
+- With the identical version string, a VEX written about the package would also have hidden the original's vulnerability. VEX scope matters.
+- With more time I would test with a real crash reproduction, pin the base image, and check the build for reproducibility.
 
 ## AI tools
 
-I used Claude Code throughout, in a learning mode where I picked each step and approved the plan first.
+I used **Claude Code** for most of the implementation and investigation, in a mode where it asks me to decide at each step. It wrote the shell scripts, the Python test and VEX generator, and the first drafts of this README, and it ran the scanners, container checks and comparisons. I picked the CVEs and techniques, the match rules for the test, what counted as evidence, and what to call "likely", and I approved each step before it was built.
 
-- **Helped:** writing and testing shell scripts in clean containers, running the scanners and diffing results, gathering advisories and Debian tracker data, and drafting the test harness.
-- **Hurt / needed checking:** pages were read through a summarizing helper, so one OpenSSL advisory row (CVE-2024-6119) was based on a summary and had to be re-checked; an early reading of that CVE was corrected. I also made it explain every finding instead of accepting scanner severities.
-- **Decisions were mine:** which CVEs, the build layout, the tests' match rules, what to accept as evidence and what to call "likely".
+**Helped:** fast, repeatable checks in clean containers; reading advisories and the Debian tracker; finding problems in its own work with negative tests.
+
+**Needed correcting:**
+- an early reading treated CVE-2024-6119 as relevant to nginx, and the advisory summary said otherwise;
+- a first VEX table said "not flagged -> gone" for something that was never flagged;
+- the first `apply-patches.sh` accepted a corrupted patch (wall 3);
+- advisory pages were read through a summarizing step, so some rows rest on summaries, noted above.
 
 ## Repository map
 
 | Path | Content |
 |---|---|
-| `build/` | `Dockerfile`, `scripts/`, `patches/` (named by CVE), `debian/` packaging, `configure-flags`, pinned `versions.env`, `SHA256SUMS`, signing keys |
-| `Containerfile`, `image/` | Final image; upstream's entrypoint files |
+| `build/` | `Dockerfile`, `scripts/`, `patches/` (named by CVE), `debian/` packaging, `configure-flags`, pins (`versions.env`, `SHA256SUMS`, `keys/`) |
+| `Containerfile`, `image/` | The final image and upstream's entrypoint scripts |
 | `test/` | Compatibility test, mp4 fixture and tools, nginx configs |
-| `baseline/`, `rescan/` | Scan reports of the original and of our image, `rescan/diff.md` |
-| `vex/` | OpenVEX document, its generator (`make_vex.py`, `make vex`) and verification (`verify.py`, `verification.md`) |
-| `scripts/` | Dev-only helpers (filtering, diffing) |
-| `Makefile` | `deb`, `image`, `self-test`, `test`, `clean` |
+| `baseline/`, `rescan/` | Scan reports of the original and of my image; `rescan/diff.md` |
+| `vex/` | VEX document, its generator and verification |
+| `scripts/` | Dev-only helpers for filtering and diffing scans |
