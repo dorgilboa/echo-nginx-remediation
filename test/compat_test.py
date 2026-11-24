@@ -20,6 +20,7 @@ Standard library only; needs a reachable `docker` CLI. Environment variables:
 from __future__ import annotations
 
 import email.utils
+import fnmatch
 import json
 import os
 import re
@@ -430,6 +431,78 @@ class ImageParity(unittest.TestCase):
                "docker-entrypoint.sh docker-entrypoint.d/* 2>&1")
         run = lambda img: docker("run", "--rm", "--entrypoint", "sh", img, "-c", cmd, check=False).stdout  # noqa: E731
         self.assertEqual(run(UPSTREAM), run(OURS))
+
+
+# ------------------------------------------------------------ file layout parity
+
+# Everything nginx-related that lives on disk: whole nginx directories, the entrypoint, and the
+# nginx-named files that packages drop into shared directories (init, systemd, logrotate, ...).
+LAYOUT_SCRIPT = r"""
+F='%p\t%y\t%m\t%U:%G\t%l\n'
+find /etc/nginx /usr/lib/nginx /usr/share/nginx /var/cache/nginx /var/log/nginx \
+     /docker-entrypoint.d /docker-entrypoint.sh -printf "$F" 2>/dev/null
+find /usr/sbin /etc/init.d /etc/default /etc/logrotate.d /lib/systemd/system /usr/share/man/man8 \
+     /usr/share/lintian/overrides /usr/share/doc -maxdepth 1 -name 'nginx*' -printf "$F" 2>/dev/null
+true
+"""
+
+# Paths upstream has and we deliberately do not ship (glob, reason). The README lists the same deviations.
+# test_exception_list_is_accurate keeps this list honest: each entry must match something upstream has and
+# nothing we ship, so it cannot hide a real difference or go stale.
+LAYOUT_EXCEPTIONS = [
+    ("/etc/default/nginx*", "init defaults file: there is no init system in a container"),
+    ("/etc/init.d/nginx*", "SysV init scripts: no init system in a container"),
+    ("/lib/systemd/system/nginx*.service", "systemd units: no init system in a container"),
+    ("/etc/logrotate.d/nginx", "logs go to stdout/stderr, nothing to rotate"),
+    ("/usr/sbin/nginx-debug", "second --with-debug binary: not built (doubles the compile, unused in containers)"),
+    ("/usr/lib/nginx/modules/*.so", "the four dynamic-module packages (geoip, image-filter, njs, xslt) are not built"),
+    ("/usr/share/doc/nginx*", "package documentation directories, including those of the four module packages"),
+]
+
+
+def layout_exception(path: str) -> str | None:
+    return next((why for pattern, why in LAYOUT_EXCEPTIONS if fnmatch.fnmatchcase(path, pattern)), None)
+
+
+class LayoutParity(unittest.TestCase):
+    """Same files, same type, mode, owner and link target as upstream, except the documented deviations."""
+
+    @staticmethod
+    def listing(image: str) -> dict[str, tuple[str, str, str, str]]:
+        out = docker("run", "--rm", "--entrypoint", "sh", image, "-c", LAYOUT_SCRIPT).stdout
+        entries = {}
+        for line in out.splitlines():
+            path, ftype, mode, owner, target = (line.split("\t") + [""] * 4)[:5]
+            entries[path] = (ftype, mode, owner, target)
+        return entries
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.up = cls.listing(UPSTREAM)
+        cls.ours = cls.listing(OURS)
+        assert len(cls.up) > 20, "upstream listing looks empty: the test itself is broken"
+
+    def test_layout_matches_upstream_except_documented_deviations(self):
+        missing = sorted(p for p in self.up.keys() - self.ours.keys() if not layout_exception(p))
+        extra = sorted(self.ours.keys() - self.up.keys())
+        changed = sorted(f"{p}: upstream {self.up[p]} vs ours {self.ours[p]}"
+                         for p in self.up.keys() & self.ours.keys() if self.up[p] != self.ours[p])
+        # subTests, so one run reports every kind of difference instead of stopping at the first
+        with self.subTest("missing"):
+            self.assertEqual([], missing, "files upstream has that we lack, and that are not documented deviations")
+        with self.subTest("extra"):
+            self.assertEqual([], extra, "files we ship that upstream does not")
+        with self.subTest("changed"):
+            self.assertEqual([], changed, "files whose type, mode, owner or link target differ")
+
+    @unittest.skipIf(SELF_TEST, "ours is upstream: every exception would match a file we also ship")
+    def test_exception_list_is_accurate(self):
+        for pattern, why in LAYOUT_EXCEPTIONS:
+            with self.subTest(pattern=pattern):
+                self.assertTrue(any(fnmatch.fnmatchcase(p, pattern) for p in self.up),
+                                f"stale exception, upstream has nothing matching {pattern!r} ({why})")
+                shipped = [p for p in self.ours if fnmatch.fnmatchcase(p, pattern)]
+                self.assertEqual([], shipped, f"exception {pattern!r} hides files we do ship")
 
 
 # --------------------------------------------------- fixes: only meaningful for our image
