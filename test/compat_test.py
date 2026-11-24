@@ -132,7 +132,7 @@ class Server:
         self.host_port: dict[int, int] = {}
 
     def start(self) -> None:
-        cmd = ["run", "-d"]
+        cmd = ["run", "-d", "--label", "echo-compat-test=1"]   # label: leftovers can be found and removed
         for p in self.ports:
             cmd += ["-p", f"127.0.0.1::{p}"]
         for src, dst in self.binds:
@@ -183,8 +183,13 @@ class Server:
         return p.stdout + p.stderr
 
     def stop(self) -> None:
+        """Remove the container. A cleanup problem must not turn passing tests into errors, so it only warns.
+        Leftovers can be removed with: docker rm -f $(docker ps -aq --filter label=echo-compat-test)"""
         if self.id:
-            docker("rm", "-f", self.id, check=False)
+            try:
+                docker("rm", "-f", self.id, check=False, timeout=90)
+            except (subprocess.TimeoutExpired, OSError) as e:
+                print(f"WARNING: could not remove container {self.id[:12]} ({self.image}): {e}", file=sys.stderr)
             self.id = None
 
 
