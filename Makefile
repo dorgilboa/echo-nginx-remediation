@@ -5,11 +5,13 @@
 ECHO_IMAGE     ?= echo-nginx:test
 UPSTREAM_IMAGE ?= nginx:1.25-bookworm
 PYTHON         ?= python3
+DIST           ?= dist
 
-.PHONY: deb image self-test test
+.PHONY: deb image self-test test clean
 
+# Build the .deb from source in a clean debian:bookworm-slim and export it to $(DIST)/ (needs BuildKit).
 deb:
-	docker build -f build/Dockerfile -t echo-nginx-build build/
+	docker build -f build/Dockerfile --target deb --output type=local,dest=$(DIST) build/
 
 image: deb
 	docker build -f Containerfile -t $(ECHO_IMAGE) .
@@ -19,3 +21,6 @@ self-test:
 
 test:
 	ECHO_IMAGE=$(ECHO_IMAGE) UPSTREAM_IMAGE=$(UPSTREAM_IMAGE) $(PYTHON) test/compat_test.py
+
+clean:
+	rm -rf $(DIST)
