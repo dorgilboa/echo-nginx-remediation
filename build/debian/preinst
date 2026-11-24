@@ -1,0 +1,23 @@
+#!/bin/sh
+# Create the nginx system group and user if the image has not already (the image pins uid/gid 101).
+set -e
+
+case "$1" in
+    install)
+        if ! getent group nginx >/dev/null; then
+            groupadd --system nginx >/dev/null
+        fi
+        if ! getent passwd nginx >/dev/null; then
+            useradd \
+                --system \
+                --gid nginx \
+                --no-create-home \
+                --home /nonexistent \
+                --comment "nginx user" \
+                --shell /usr/sbin/nologin \
+                nginx >/dev/null
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,5 @@
+# Keep local leftovers out of the build context (the build fetches its own source).
+src/
+out/
+*.deb
+*.tar.gz

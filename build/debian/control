@@ -1,0 +1,14 @@
+Package: nginx
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Echo nginx remediation <build@echo.invalid>
+Section: httpd
+Priority: optional
+Installed-Size: @INSTALLED_SIZE@
+Depends: libc6 (>= 2.34), libcrypt1 (>= 1:4.1.0), libpcre2-8-0 (>= 10.22), libssl3 (>= 3.0.22-1~deb12u2), zlib1g (>= 1:1.1.4)
+Homepage: https://nginx.org
+Description: high performance web server (Echo remediated build)
+ nginx 1.25.5 built from the verified upstream source, with the CVE-2024-7347
+ backport applied and linked against a libssl3 that includes the security fixes
+ (the Depends line enforces it). Core server only: no init scripts, systemd units
+ or dynamic modules, because it is meant to run in a container.
