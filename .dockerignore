@@ -1,0 +1,4 @@
+# Build context for the Containerfile (repo root): only what it COPYs.
+*
+!image/
+!dist/*.deb
