@@ -1,0 +1,28 @@
+HIGH      CVE-2026-103111  libpcre2-8-0  10.42-1 -> 10.42-1+deb12u2
+    pcre2: pcre2: Out-of-bounds write via crafted regular expression
+HIGH      CVE-2026-86145   libpcre2-8-0  10.42-1 -> 10.42-1+deb12u1
+    pcre2: PCRE2: Out-of-bounds write allows arbitrary code execution via crafted regular expressions
+HIGH      CVE-2026-89157   libpcre2-8-0  10.42-1 -> 10.42-1+deb12u1
+    pcre2: PCRE2: Out-of-bounds write via large pattern input
+HIGH      CVE-2026-89161   libpcre2-8-0  10.42-1 -> 10.42-1+deb12u1
+    pcre2: PCRE2: Memory corruption vulnerability in pcre2_jit_match
+CRITICAL  CVE-2026-31789   libssl3       3.0.11-1~deb12u2 -> 3.0.19-1~deb12u2
+    openssl: OpenSSL: Heap buffer overflow on 32-bit systems from large X.509 certificate processing
+HIGH      CVE-2024-6119    libssl3       3.0.11-1~deb12u2 -> 3.0.14-1~deb12u2
+    openssl: Possible denial of service in X.509 name checks
+HIGH      CVE-2025-15467   libssl3       3.0.11-1~deb12u2 -> 3.0.18-1~deb12u2
+    openssl: OpenSSL: Remote code execution or Denial of Service via oversized Initialization Vector in CMS parsing
+HIGH      CVE-2025-69421   libssl3       3.0.11-1~deb12u2 -> 3.0.18-1~deb12u2
+    openssl: OpenSSL: Denial of Service via malformed PKCS#12 file processing
+HIGH      CVE-2026-28387   libssl3       3.0.11-1~deb12u2 -> 3.0.19-1~deb12u2
+    openssl: OpenSSL: Arbitrary code execution due to use-after-free in DANE TLSA authentication
+HIGH      CVE-2026-28388   libssl3       3.0.11-1~deb12u2 -> 3.0.19-1~deb12u2
+    openssl: OpenSSL: Denial of Service due to NULL pointer dereference in delta CRL processing
+HIGH      CVE-2026-28389   libssl3       3.0.11-1~deb12u2 -> 3.0.19-1~deb12u2
+    openssl: OpenSSL: Denial of Service vulnerability in CMS processing
+HIGH      CVE-2026-28390   libssl3       3.0.11-1~deb12u2 -> 3.0.19-1~deb12u2
+    openssl: OpenSSL: Denial of Service due to NULL pointer dereference in CMS EnvelopedData processing
+HIGH      CVE-2026-45447   libssl3       3.0.11-1~deb12u2 -> 3.0.20-1~deb12u2
+    openssl: Heap Use-After-Free in OpenSSL PKCS7_verify()
+HIGH      CVE-2026-84782   libssl3       3.0.11-1~deb12u2 -> 3.0.22-1~deb12u2
+    openssl: compat-openssl: openssl: Information disclosure via DTLS handshake retransmission
