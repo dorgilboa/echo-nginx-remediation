@@ -126,6 +126,7 @@ The test came before the image: `make self-test` (original against original) pas
 4. **Two "new" findings in Trivy.** My package is flagged for CVE-2009-4487 and CVE-2013-0337 (old, low), and the original is not. A test showed Trivy skips them when the package's Maintainer field is NGINX's. Copying that would credit my build to F5, so I left it, documented them and covered them in the VEX.
 5. **A test run that stalled.** Twice, container cleanup took far longer than normal and once reported a negative timeout, which points to the host pausing and not to nginx. I could not prove the cause, so cleanup now only warns, and test containers carry a label so leftovers can be found.
 6. **Windows and Linux.** Files written on Windows had CRLF line endings that broke flag files inside Linux containers. `.gitattributes` forces LF and scratch files get `\r` stripped.
+7. **The fix did not look fixed.** After the backport, scanners still listed CVE-2024-7347, because the version number is the same and they only compare version numbers. A VEX file is how you tell them it is fixed, but it was not a one-step fix either: Trivy never reports that CVE, so only Grype can show it disappearing, and a VEX that named just the package would also have hidden the problem on the original image, which still has it. I tied the statements to my image's digest instead, and checked that the original stays flagged.
 
 ## Differences from the original image
 
