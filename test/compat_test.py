@@ -27,6 +27,7 @@ import shlex
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -34,11 +35,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mp4_tools import unordered_stsc  # noqa: E402
+
 UPSTREAM = os.environ.get("UPSTREAM_IMAGE", "nginx:1.25-bookworm")
 OURS = os.environ.get("ECHO_IMAGE", "echo-nginx:test")
 HOST = os.environ.get("ECHO_HOST", "127.0.0.1")
 MIN_LIBSSL = "3.0.22-1~deb12u2"  # the bumped OpenSSL package version (see LOG / README)
 CONF_DIR = Path(__file__).resolve().parent / "conf"
+FIXTURE_MP4 = Path(__file__).resolve().parent / "fixtures" / "valid.mp4"
 VOLATILE = ("date", "etag", "last-modified")
 SELF_TEST = OURS == UPSTREAM
 CLOCK_SLACK = timedelta(seconds=5)
@@ -171,6 +176,11 @@ class Server:
                     return False
         except OSError:
             return False
+
+    def logs(self) -> str:
+        """Everything nginx wrote to stdout/stderr (access log and error log) so far."""
+        p = docker("logs", self.id, check=False)
+        return p.stdout + p.stderr
 
     def stop(self) -> None:
         if self.id:
@@ -310,6 +320,77 @@ class TlsParity(ParityCase):
         self.assertEqual(handshake(self.up), handshake(self.ours), "TLS version / ALPN choice differ")
 
 
+# ------------------------------------------------------ mp4 module (CVE-2024-7347 backport)
+
+def make_video_dir() -> tempfile.TemporaryDirectory:
+    """A directory holding valid.mp4 and unordered.mp4 (valid.mp4 with a backwards stsc table)."""
+    tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    data = FIXTURE_MP4.read_bytes()
+    (Path(tmp.name) / "valid.mp4").write_bytes(data)
+    (Path(tmp.name) / "unordered.mp4").write_bytes(unordered_stsc(data))
+    return tmp
+
+
+class Mp4Parity(ParityCase):
+    """Normal mp4 seeking must be untouched by the patch, and clients must not see a new behaviour."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        video = make_video_dir()
+        cls.addClassCleanup(video.cleanup)
+        cls.binds = ((str(CONF_DIR / "mp4.conf"), "/etc/nginx/conf.d/default.conf"), (video.name, "/srv/video"))
+        super().setUpClass()
+
+    def test_valid_file_whole(self):
+        up, ours = self.both(build_request("GET", "/video/valid.mp4"))
+        self.assertIn("200", up.status)
+        self.assertSame(up, ours, "GET valid.mp4")
+
+    def test_valid_file_seek(self):
+        for start in ("1", "1.5"):
+            with self.subTest(start=start):
+                up, ours = self.both(build_request("GET", f"/video/valid.mp4?start={start}"))
+                self.assertIn("200", up.status)
+                self.assertSame(up, ours, f"GET valid.mp4?start={start}")
+
+    def test_unordered_file_http_response_unchanged(self):
+        # Upstream already answers 500 here (a later check in the module catches the file), so the
+        # patch must not change what a client sees. Only the error log differs (see Mp4PatchVerification).
+        up, ours = self.both(build_request("GET", "/video/unordered.mp4?start=1"))
+        self.assertIn("500", up.status, "sanity: upstream should answer 500 for the malformed file")
+        self.assertSame(up, ours, "GET unordered.mp4?start=1")
+
+
+@unittest.skipIf(SELF_TEST, "ours is upstream: the patch is not expected to be present")
+class Mp4PatchVerification(unittest.TestCase):
+    """Evidence that the CVE-2024-7347 backport is active in OUR image.
+
+    We could not make upstream crash with a crafted file, so the observable difference is the error
+    log: the patched check says "unordered mp4 stsc chunks"; unpatched nginx 1.25.5 says something else."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        video = make_video_dir()
+        cls.addClassCleanup(video.cleanup)
+        cls.server = Server(OURS, (80,), ((str(CONF_DIR / "mp4.conf"), "/etc/nginx/conf.d/default.conf"),
+                                          (video.name, "/srv/video")))
+        cls.addClassCleanup(cls.server.stop)
+        cls.server.start()
+
+    def get(self, target: str) -> Response:
+        return parse_response(exchange(self.server.host_port[80], build_request("GET", target)))
+
+    def test_unordered_stsc_is_rejected_with_the_new_log_message(self):
+        r = self.get("/video/unordered.mp4?start=1")
+        self.assertIn("500", r.status)
+        self.assertIn("unordered mp4 stsc chunks", self.server.logs())
+
+    def test_worker_survives_the_malformed_file(self):
+        self.get("/video/unordered.mp4?start=1")
+        self.assertIn("200", self.get("/ping").status, "server stopped answering after the bad request")
+        self.assertNotIn("exited on signal", self.server.logs())
+
+
 # --------------------------------------------------- image-level parity (no server needed)
 
 class ImageParity(unittest.TestCase):
@@ -360,9 +441,6 @@ class FixVerification(unittest.TestCase):
     def test_nginx_links_libssl3(self):
         out = docker("run", "--rm", "--entrypoint", "ldd", OURS, "/usr/sbin/nginx").stdout
         self.assertIn("libssl.so.3", out)
-
-    # TODO (next step): CVE-2024-7347 - request a crafted mp4 (unordered stsc table) with ?start=
-    # and assert our image rejects it cleanly and logs "unordered mp4 stsc chunks".
 
 
 # --------------------------------------------------------------------------- main
