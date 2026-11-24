@@ -7,7 +7,7 @@ UPSTREAM_IMAGE ?= nginx:1.25-bookworm
 PYTHON         ?= python3
 DIST           ?= dist
 
-.PHONY: deb image self-test test clean
+.PHONY: deb image vex self-test test clean
 
 # Build the .deb from source in a clean debian:bookworm-slim and export it to $(DIST)/ (needs BuildKit).
 deb:
@@ -15,6 +15,10 @@ deb:
 
 image: deb
 	docker build -f Containerfile -t $(ECHO_IMAGE) .
+
+# Generate the VEX document for the built image (bound to its digest; regenerate after every rebuild).
+vex:
+	$(PYTHON) vex/make_vex.py $(ECHO_IMAGE) --out vex/echo-nginx.openvex.json
 
 self-test:
 	ECHO_IMAGE=$(UPSTREAM_IMAGE) UPSTREAM_IMAGE=$(UPSTREAM_IMAGE) $(PYTHON) test/compat_test.py
